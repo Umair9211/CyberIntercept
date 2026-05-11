@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 export default function RequestPanel({ request, onClose }) {
   const [fullRequest, setFullRequest] = useState("");
+  const router = useRouter();
 
   useEffect(() => {
     if (!request) {
@@ -23,6 +25,14 @@ export default function RequestPanel({ request, onClose }) {
     setFullRequest(requestText);
   }, [request]);
 
+  const handleSendRequest = () => {
+    console.log("Send request (mock):", { request, fullRequest });
+  };
+
+  const handleOpenPayload = () => {
+    router.push("/payload");
+  };
+
   if (!request) {
     return null;
   }
@@ -35,13 +45,29 @@ export default function RequestPanel({ request, onClose }) {
             <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Request inspector</p>
             <h2 className="mt-2 text-2xl font-semibold text-slate-100">{request.method} {request.url}</h2>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-2xl border border-slate-800/80 bg-slate-950/90 px-4 py-2 text-sm text-slate-200 transition hover:bg-slate-900"
-          >
-            Close inspector
-          </button>
+          <div className="flex gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleSendRequest}
+              className="rounded-2xl border border-emerald-700/50 bg-emerald-950/50 px-4 py-2 text-sm text-emerald-300 transition hover:bg-emerald-900/70 hover:border-emerald-600"
+            >
+              Send
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenPayload}
+              className="rounded-2xl border border-amber-700/50 bg-amber-950/50 px-4 py-2 text-sm text-amber-300 transition hover:bg-amber-900/70 hover:border-amber-600"
+            >
+              Payload
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-2xl border border-slate-800/80 bg-slate-950/90 px-4 py-2 text-sm text-slate-200 transition hover:bg-slate-900"
+            >
+              Close inspector
+            </button>
+          </div>
         </div>
 
         <div className="space-y-4 p-6">
