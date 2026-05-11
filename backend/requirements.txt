@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+mitmproxy
+requests
+httpx
+sqlalchemy
+websockets
+python-multipart
+psutil
