@@ -40,6 +40,32 @@ def _normalize_headers(headers: Optional[Dict[str, Any]]) -> Dict[str, str]:
     return normalized
 
 
+# Hop-by-hop / framing headers from captured traffic must not be forwarded as-is:
+# httpx sets Content-Length (or chunked) from `content=`; a stale Content-Length breaks h11.
+_HOP_BY_HOP = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "content-length",
+    }
+)
+
+
+def _sanitize_repeater_outbound_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    return {
+        name: value
+        for name, value in headers.items()
+        if name.lower() not in _HOP_BY_HOP
+    }
+
+
 def _is_backend_self_request(url: str) -> bool:
     parsed = urlparse(url)
     hostname = parsed.hostname
@@ -98,6 +124,13 @@ async def get_requests():
     return storage.captured_requests
 
 
+@router.delete("/api/requests")
+async def clear_requests():
+    storage.captured_requests.clear()
+    storage.pending_requests.clear()
+    return {"status": "cleared"}
+
+
 @router.post("/api/repeater/send")
 async def send_repeater_request(data: RepeaterRequest):
     if _is_backend_self_request(str(data.url)):
@@ -113,7 +146,7 @@ async def send_repeater_request(data: RepeaterRequest):
             },
         )
 
-    request_headers = _normalize_headers(data.headers)
+    request_headers = _sanitize_repeater_outbound_headers(_normalize_headers(data.headers))
     request_content = data.body.encode("utf-8") if data.body is not None else None
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
@@ -124,7 +157,7 @@ async def send_repeater_request(data: RepeaterRequest):
                 headers=request_headers,
                 content=request_content,
             )
-        except httpx.RequestError as exc:
+        except Exception as exc:
             return JSONResponse(
                 status_code=502,
                 content={

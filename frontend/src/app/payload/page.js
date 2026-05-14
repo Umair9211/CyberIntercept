@@ -1,581 +1,573 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { sendRepeaterRequest } from "@/lib/api";
+import { buildRequestText, parseRawHttpMessage } from "@/lib/httpRawRequest";
 
-const MAX_FILE_READ_BYTES = 256 * 1024; // Read only the first 256KB of large text files
-
-export default function PayloadPage() {
-  const router = useRouter();
-  const fileInputRef = useRef(null);
-  const resultsContainerRef = useRef(null);
-  const resultsEndRef = useRef(null);
-  const scrollTimerRef = useRef(null);
-
-  const [payloadText, setPayloadText] = useState("");
-  const [payloadWords, setPayloadWords] = useState([]);
-  const [wordLimit, setWordLimit] = useState(2000);
-  const [fileName, setFileName] = useState("");
-  const [sortDirection, setSortDirection] = useState('asc'); // 'asc' or 'desc'
-  const [previewResult, setPreviewResult] = useState("");
-  const [sendResults, setSendResults] = useState([]);
-  const [isSending, setIsSending] = useState(false);
-  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
-  const [requestText, setRequestText] = useState(`GET /example HTTP/1.1
+const DEFAULT_REQUEST = `GET /example HTTP/1.1
 Host: example.com
 User-Agent: Mozilla/5.0
 Accept: text/html
 
-username=user&password=123`);
+username=user&password=changeme`;
 
-  // Handle manual payload input
-  const handlePayloadInputChange = (e) => {
-    setPayloadText(e.target.value);
-  };
+/** Max word-list file size: only files strictly smaller than 50 MiB are accepted. */
+const MAX_WORDLIST_FILE_BYTES = 50 * 1024 * 1024;
 
-  const readFirstWordsFromFile = (file) => {
-    const slice = file.slice(0, MAX_FILE_READ_BYTES);
-    const reader = new FileReader();
+function isLikelyTextFile(file) {
+  const t = (file.type || "").toLowerCase();
+  if (t.startsWith("text/")) return true;
+  if (t === "application/json" || t === "application/xml" || t === "application/x-ndjson") return true;
+  if (/\.(txt|csv|lst|log|md|tsv|dict)$/i.test(file.name)) return true;
+  if (t === "" || t === "application/octet-stream") {
+    return /\.(txt|csv|lst|log|md|tsv|dict)$/i.test(file.name);
+  }
+  return false;
+}
 
-    reader.onload = (event) => {
-      const content = event.target?.result || "";
-      const text = typeof content === "string" ? content : "";
-      const words = text
-        .split(/\s+/)
-        .map((word) => word.trim())
-        .filter((word) => word.length > 0);
+function mapCaretAfterUnwrap(pos, matchStart, matchEnd) {
+  let p = pos;
+  if (p > matchStart) p -= 1;
+  if (p >= matchEnd) p -= 1;
+  return Math.max(0, p);
+}
 
-      if (words.length === 0) {
-        alert("The selected file does not contain readable payload words.");
-        return;
-      }
+function statusClass(code) {
+  if (typeof code !== "number" || Number.isNaN(code)) return "text-slate-400";
+  if (code >= 200 && code < 300) return "text-emerald-300";
+  if (code >= 300 && code < 400) return "text-sky-300";
+  if (code >= 400 && code < 500) return "text-amber-300";
+  if (code >= 500) return "text-rose-300";
+  return "text-slate-300";
+}
 
-      setPayloadText(text);
-      processPayloadText(text);
-    };
+function statusBadgeClass(code) {
+  if (typeof code !== "number" || Number.isNaN(code)) return "bg-slate-700/30 text-slate-300";
+  if (code >= 200 && code < 300) return "bg-emerald-500/15 text-emerald-300";
+  if (code >= 300 && code < 400) return "bg-sky-500/15 text-sky-300";
+  if (code >= 400 && code < 500) return "bg-amber-500/15 text-amber-300";
+  if (code >= 500) return "bg-rose-500/15 text-rose-300";
+  return "bg-slate-700/30 text-slate-300";
+}
 
-    reader.onerror = () => {
-      alert("Unable to read the selected file. Please check the file type and try again.");
-    };
+function statusSortValue(row) {
+  return row.error ? 100_000 : (row.status_code ?? 0);
+}
 
-    reader.readAsText(slice);
-  };
-
-  // Handle file upload
-  const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setFileName(file.name);
-    readFirstWordsFromFile(file);
-  };
-
-  // Process payload text into words
-  const processPayloadText = (text) => {
-    const words = text
-      .split(/\s+/)
-      .map((word) => word.trim())
-      .filter((word) => word.length > 0)
-      .slice(0, wordLimit);
-
-    setPayloadWords(words);
-    setPreviewResult("");
-  };
-
-  // Handle add/import payload button
-  const handleAddPayload = () => {
-    if (payloadText.trim()) {
-      processPayloadText(payloadText);
-    }
-  };
-
-  // Handle sort by code
-  const handleSort = () => {
-    setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
-  };
-
-  const handleResultsInteraction = () => {
-    if (autoScrollEnabled) {
-      setAutoScrollEnabled(false);
-    }
-    if (scrollTimerRef.current) {
-      window.clearTimeout(scrollTimerRef.current);
-    }
-    scrollTimerRef.current = window.setTimeout(() => {
-      setAutoScrollEnabled(true);
-    }, 3000);
-  };
+export default function PayloadPage() {
+  const requestRef = useRef(null);
+  const wordListFileRef = useRef(null);
+  const [requestText, setRequestText] = useState(DEFAULT_REQUEST);
+  const [wordListText, setWordListText] = useState("");
+  const [wordListFileName, setWordListFileName] = useState("");
+  const [wordListFileError, setWordListFileError] = useState("");
+  const [delayMs, setDelayMs] = useState(0);
+  const [sending, setSending] = useState(false);
+  const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [results, setResults] = useState([]);
+  const [expandedId, setExpandedId] = useState(null);
+  /** null = not used; combined: status first, then preview within equal status */
+  const [resultsStatusDir, setResultsStatusDir] = useState(null);
+  const [resultsPreviewDir, setResultsPreviewDir] = useState(null);
+  const isCancelled = useRef(false);
+  const resultsScrollRef = useRef(null);
+  const resultsStickBottomRef = useRef(true);
 
   useEffect(() => {
-    return () => {
-      if (scrollTimerRef.current) {
-        window.clearTimeout(scrollTimerRef.current);
-      }
-    };
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const raw = params.get("data");
+      if (!raw) return;
+      const request = JSON.parse(decodeURIComponent(atob(raw)));
+      setRequestText(buildRequestText(request));
+    } catch {
+      // Invalid or missing payload query — keep default template
+    }
   }, []);
 
-  useEffect(() => {
-    if (!autoScrollEnabled || sendResults.length === 0) return;
-    const container = resultsContainerRef.current;
-    if (container) {
-      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-    }
-  }, [sendResults, autoScrollEnabled]);
+  const words = wordListText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 
-  // Handle mark payload
-  const handleMarkPayload = () => {
-    const textarea = document.querySelector('#request-textarea');
-    if (!textarea) return;
+  const markerMatch = requestText.match(/§([^§]*)§/);
+  const hasInjection = markerMatch && markerMatch[1].length > 0;
+  const placeholderLabel = markerMatch?.[1] ? `§${markerMatch[1]}§` : "None (select text and click Mark §)";
 
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    if (start === end) {
-      alert("Please select some text to mark as payload");
-      return;
-    }
+  const handleMarkSection = useCallback(() => {
+    const ta = requestRef.current;
+    if (!ta) return;
 
-    const selectedText = requestText.substring(start, end);
-    const before = requestText.substring(0, start);
-    const after = requestText.substring(end);
-    const newText = `${before}@{${selectedText}}${after}`;
-    setRequestText(newText);
-  };
+    let t = requestText;
+    let s = ta.selectionStart;
+    let e = ta.selectionEnd;
 
-  // Handle clear payload markers
-  const handleClearPayloadMarkers = () => {
-    const newText = requestText.replace(/@\{[^}]+\}/g, (match) => match.slice(2, -1));
-    setRequestText(newText);
-  };
-
-  const parseRequestText = (text) => {
-    const normalized = text.replace(/\r\n/g, "\n");
-    const lines = normalized.split("\n");
-    const requestLine = lines.find((line) => line.trim().length > 0);
-    if (!requestLine) return null;
-
-    const [method, path] = requestLine.split(" ");
-    if (!method || !path) return null;
-
-    const headers = {};
-    const bodyLines = [];
-    let isBody = false;
-
-    for (let i = 1; i < lines.length; i += 1) {
-      const line = lines[i];
-      if (!isBody && line.trim() === "") {
-        isBody = true;
-        continue;
-      }
-      if (isBody) {
-        bodyLines.push(line);
-      } else {
-        const splitIndex = line.indexOf(":");
-        if (splitIndex !== -1) {
-          const name = line.slice(0, splitIndex).trim().toLowerCase();
-          const value = line.slice(splitIndex + 1).trim();
-          headers[name] = value;
-        }
-      }
+    const m = /§([^§]*)§/.exec(t);
+    if (m) {
+      const matchStart = m.index;
+      const matchEnd = m.index + m[0].length;
+      t = t.replace(/§([^§]*)§/, "$1");
+      s = mapCaretAfterUnwrap(s, matchStart, matchEnd);
+      e = mapCaretAfterUnwrap(e, matchStart, matchEnd);
     }
 
-    let url = path;
-    if (!path.startsWith("http://") && !path.startsWith("https://")) {
-      const hostHeader = headers.host || "";
-      const scheme = hostHeader.startsWith("https://") ? "" : "http://";
-      url = hostHeader ? `${hostHeader.startsWith("http") ? "" : scheme}${hostHeader}${path}` : path;
-    }
+    if (s === e || e > t.length || s < 0) return;
+    const selected = t.slice(s, e);
+    if (!selected) return;
 
-    return {
-      method,
-      url,
-      headers,
-      body: bodyLines.join("\n") || undefined,
-    };
-  };
+    const next = `${t.slice(0, s)}§${selected}§${t.slice(e)}`;
+    setRequestText(next);
+  }, [requestText]);
 
-  const buildSendRequestText = (word) => {
-    const markers = requestText.match(/@\{[^}]+\}/g) || [];
-    if (markers.length === 0) return null;
-
-    let sendText = requestText;
-    markers.forEach((marker) => {
-      sendText = sendText.replace(marker, word);
-    });
-
-    return sendText;
+  const handleStop = () => {
+    isCancelled.current = true;
   };
 
   const handleSendPayload = async () => {
-    if (payloadWords.length === 0) {
-      alert("Please add payload words before sending.");
-      return;
-    }
+    if (!hasInjection || words.length === 0) return;
 
-    const markers = requestText.match(/@\{[^}]+\}/g) || [];
-    if (markers.length === 0) {
-      alert("Please mark at least one payload injection point in the request using 'Mark Payload'.");
-      return;
-    }
+    isCancelled.current = false;
+    setSending(true);
+    setProgress({ current: 0, total: words.length });
 
-    setIsSending(true);
-    setSendResults([]);
-    setAutoScrollEnabled(true);
-    setPreviewResult(`Sending ${payloadWords.length} payload requests...`);
+    for (let i = 0; i < words.length; i += 1) {
+      if (isCancelled.current) break;
 
-    for (const word of payloadWords) {
-      const sendText = buildSendRequestText(word);
-      const parsed = sendText ? parseRequestText(sendText) : null;
+      const word = words[i];
+      setProgress({ current: i + 1, total: words.length });
 
-      if (!parsed || !parsed.method || !parsed.url) {
-        setSendResults((prev) => [
-          ...prev,
-          {
-            word,
-            status: 0,
-            url: "",
-            bodySnippet: "",
-            elapsed: 0,
-            error: "Unable to parse request for this payload word.",
-          },
-        ]);
-        continue;
-      }
-
-      const requestBody = {
-        method: parsed.method,
-        url: parsed.url,
-        headers: parsed.headers,
-        body: parsed.body,
-      };
+      const filled = requestText.replace(/§([^§]*)§/, word);
+      const id = `${Date.now()}-${i}`;
 
       try {
-        const response = await fetch("/api/repeater/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(requestBody),
-        });
-        const result = await response.json();
+        const payload = parseRawHttpMessage(filled);
+        const data = await sendRepeaterRequest(payload);
+        const bodyStr = data.body != null ? String(data.body) : "";
+        const elapsedMs =
+          typeof data.elapsed === "number" ? Math.round(data.elapsed * 1000) : 0;
+        const code = typeof data.status_code === "number" ? data.status_code : 0;
 
-        setSendResults((prev) => [
+        setResults((prev) => [
           ...prev,
           {
+            id,
             word,
-            status: result.status_code ?? response.status,
-            url: parsed.url,
-            bodySnippet: result.body ? String(result.body).slice(0, 120) : "",
-            elapsed: result.elapsed ?? 0,
-            error: result.error ?? (response.ok ? null : JSON.stringify(result)),
+            status_code: code,
+            elapsedMs,
+            preview: bodyStr.slice(0, 120),
+            fullBody: bodyStr,
+            error: data.error ?? null,
           },
         ]);
-      } catch (error) {
-        setSendResults((prev) => [
+      } catch (err) {
+        setResults((prev) => [
           ...prev,
           {
+            id,
             word,
-            status: 0,
-            url: parsed.url,
-            bodySnippet: "",
-            elapsed: 0,
-            error: error?.message || "Network error",
+            status_code: 0,
+            elapsedMs: 0,
+            preview: "",
+            fullBody: "",
+            error: err.message ?? "Request failed",
           },
         ]);
       }
+
+      if (delayMs > 0 && i < words.length - 1 && !isCancelled.current) {
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
     }
 
-    setIsSending(false);
-    setPreviewResult(`Completed sending ${payloadWords.length} payload requests.`);
+    setSending(false);
+    setProgress({ current: 0, total: 0 });
   };
 
-  // Apply payload and generate preview
-  const handleApplyPayload = () => {
-    if (payloadWords.length === 0) {
-      alert("Please add payload words before applying payload.");
+  useEffect(() => {
+    const el = resultsScrollRef.current;
+    if (!el || results.length === 0) return;
+    if (!resultsStickBottomRef.current) return;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }, [results, expandedId]);
+
+  const handleResultsScroll = () => {
+    const el = resultsScrollRef.current;
+    if (!el) return;
+    const nearBottom = 48;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    resultsStickBottomRef.current = dist <= nearBottom;
+  };
+
+  const markEnabled = () => {
+    const ta = requestRef.current;
+    if (!ta) return false;
+    return ta.selectionStart !== ta.selectionEnd;
+  };
+
+  const [, force] = useState(0);
+  const onSelectRequest = () => force((n) => n + 1);
+
+  const handleWordListFile = useCallback((e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    setWordListFileError("");
+    if (file.size >= MAX_WORDLIST_FILE_BYTES) {
+      setWordListFileError(
+        `File is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Must be under 50 MB.`
+      );
+      return;
+    }
+    if (!isLikelyTextFile(file)) {
+      setWordListFileError("Choose a text-based file (e.g. .txt, .csv) or a file with a text/* type.");
       return;
     }
 
-    const markers = requestText.match(/@\{[^}]+\}/g) || [];
-    if (markers.length === 0) {
-      alert("Please mark at least one payload injection point in the request using 'Mark Payload'.");
-      return;
-    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = typeof reader.result === "string" ? reader.result : "";
+      setWordListText(text);
+      setWordListFileName(file.name);
+    };
+    reader.onerror = () => {
+      setWordListFileError("Could not read that file.");
+      setWordListFileName("");
+    };
+    reader.readAsText(file);
+  }, []);
 
-    const previewExamples = payloadWords.slice(0, 3).map((word, i) => {
-      let modifiedRequest = requestText;
-      markers.forEach((marker) => {
-        modifiedRequest = modifiedRequest.replace(marker, word);
-      });
-      return `\nRequest ${i + 1} (using "${word}"):\n${modifiedRequest}\n---`;
+  const canSend = hasInjection && words.length > 0 && !sending;
+  const n = words.length;
+
+  const sortedResults = useMemo(() => {
+    if (resultsStatusDir === null && resultsPreviewDir === null) return results;
+    const copy = [...results];
+    copy.sort((a, b) => {
+      if (resultsStatusDir !== null) {
+        const va = statusSortValue(a);
+        const vb = statusSortValue(b);
+        const sd = resultsStatusDir === "asc" ? va - vb : vb - va;
+        if (sd !== 0) return sd;
+      }
+      if (resultsPreviewDir !== null) {
+        const pa = (a.preview || "").toLowerCase();
+        const pb = (b.preview || "").toLowerCase();
+        let pd = pa.localeCompare(pb, undefined, { numeric: true, sensitivity: "base" });
+        if (pd === 0) pd = String(a.id).localeCompare(String(b.id));
+        if (pd !== 0) return resultsPreviewDir === "asc" ? pd : -pd;
+      }
+      return String(a.id).localeCompare(String(b.id));
     });
+    return copy;
+  }, [results, resultsStatusDir, resultsPreviewDir]);
 
-    const preview = `
-PAYLOAD PREVIEW:
-================
+  const toggleResultsSortByStatus = useCallback(() => {
+    setResultsStatusDir((d) => (d === null ? "asc" : d === "asc" ? "desc" : null));
+  }, []);
 
-Payload Words Loaded: ${payloadWords.length}
+  const toggleResultsSortByPreview = useCallback(() => {
+    setResultsPreviewDir((d) => (d === null ? "asc" : d === "asc" ? "desc" : null));
+  }, []);
 
-Injection Points Found: ${markers.length}
-
-EXAMPLE MODIFIED REQUESTS:${previewExamples.join("\n")}
-
-Ready to send payloads using the Send Payload button.
-    `.trim();
-
-    setPreviewResult(preview);
-    console.log("Apply payload preview:", {
-      payloadWords: payloadWords.slice(0, 3),
-      markers,
-    });
-  };
+  const handleClearResults = useCallback(() => {
+    setResults([]);
+    setExpandedId(null);
+    setResultsStatusDir(null);
+    setResultsPreviewDir(null);
+  }, []);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-4 sm:p-6">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <div className="min-h-screen bg-slate-950 p-4 text-slate-100 sm:p-6">
+      <div className="mx-auto max-w-6xl space-y-6">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Payload Builder</p>
-            <h1 className="mt-2 text-4xl font-bold text-slate-100">Craft & Test Payloads</h1>
-            <p className="mt-2 text-slate-400">Create custom payloads and preview injection points</p>
+            <p className="text-xs uppercase tracking-[0.24em] text-slate-500">CyberIntercept</p>
+            <h1 className="mt-2 text-3xl font-semibold text-slate-100">Payload / Intruder</h1>
+            <p className="mt-2 text-sm text-slate-400">
+              Mark an injection point with §, load a word list, send sequentially via the repeater API.
+            </p>
           </div>
-          <button
-            onClick={() => router.back()}
-            className="rounded-2xl border border-slate-800/80 bg-slate-950/90 px-4 py-2 text-sm text-slate-200 transition hover:bg-slate-900"
+          <Link
+            href="/"
+            className="inline-flex w-fit rounded-2xl border border-slate-800/80 bg-slate-900/80 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-600 hover:bg-slate-900"
           >
-            Back
-          </button>
+            ← Dashboard
+          </Link>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Column: Request & Payload Input */}
-          <div className="lg:col-span-2 space-y-6">
-            {/* Request Display */}
-            <div className="rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6">
-              <div className="flex items-center justify-between gap-4 mb-4">
-                <div>
-                  <h2 className="text-lg font-semibold text-slate-100">Request Inspector</h2>
-                  <p className="text-sm text-slate-500">Select text to mark as payload injection points</p>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={handleMarkPayload}
-                    className="rounded-2xl border border-blue-700/50 bg-blue-950/50 px-4 py-2 text-sm text-blue-300 transition hover:bg-blue-900/70 hover:border-blue-600"
-                  >
-                    Mark Payload
-                  </button>
-                  <button
-                    onClick={handleClearPayloadMarkers}
-                    className="rounded-2xl border border-red-700/50 bg-red-950/50 px-4 py-2 text-sm text-red-300 transition hover:bg-red-900/70 hover:border-red-600"
-                  >
-                    Clear Markers
-                  </button>
-                </div>
-              </div>
-              <textarea
-                id="request-textarea"
-                value={requestText}
-                onChange={(e) => setRequestText(e.target.value)}
-                className="w-full h-48 rounded-2xl border border-slate-800/80 bg-slate-950/90 p-4 text-sm text-slate-100 outline-none focus:border-emerald-500/80"
-                placeholder="Paste your request here..."
-              />
-            </div>
-            {/* Payload Word Limit */}
-            <div className="rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6">
-              <h2 className="text-lg font-semibold text-slate-100 mb-4">Payload Word Limit</h2>
-              <div className="flex items-center gap-4">
-                <label className="text-sm text-slate-300">Limit:</label>
-                <input
-                  type="number"
-                  value={wordLimit}
-                  onChange={(e) => setWordLimit(Math.max(1, parseInt(e.target.value) || 1))}
-                  className="w-24 rounded-2xl border border-slate-800/80 bg-slate-950/90 px-3 py-2 text-sm text-slate-100 outline-none focus:border-emerald-500/80"
-                  min="1"
-                />
-                <span className="text-sm text-slate-500">words (default: 2000)</span>
-              </div>
-            </div>
-
-            {/* Payload Input */}
-            <div className="rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6">
-              <h2 className="text-lg font-semibold text-slate-100 mb-4">Payload Input System</h2>
-
-              {/* Manual Input */}
-              <div className="mb-6">
-                <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Paste Payload Text
-                </label>
-                <textarea
-                  value={payloadText}
-                  onChange={handlePayloadInputChange}
-                  placeholder="Enter payload words or lines here... One per line or separated by spaces"
-                  className="w-full h-32 rounded-2xl border border-slate-800/80 bg-slate-950/90 p-4 text-sm text-slate-100 outline-none focus:border-emerald-500/80"
-                />
-              </div>
-
-              {/* File Upload */}
-              <div className="mb-6">
-                <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Or Import .txt File
-                </label>
-                <div
-                  onClick={() => fileInputRef.current?.click()}
-                  className="rounded-2xl border-2 border-dashed border-slate-800/80 bg-slate-950/50 p-6 text-center cursor-pointer transition hover:border-emerald-500/50 hover:bg-slate-950/80"
-                >
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".txt"
-                    onChange={handleFileUpload}
-                    className="hidden"
-                  />
-                  <p className="text-slate-400">📁 Click to upload or drag & drop .txt file</p>
-                  <p className="text-xs text-slate-500 mt-2">
-                    Only the first {wordLimit} words are read from the first {MAX_FILE_READ_BYTES / 1024}KB of the file.
-                  </p>
-                  {fileName && (
-                    <p className="text-xs text-slate-500 mt-2">Loaded file: {fileName}</p>
-                  )}
-                </div>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="flex gap-3">
-                <button
-                  onClick={handleAddPayload}
-                  className="flex-1 rounded-2xl border border-emerald-700/50 bg-emerald-950/50 px-4 py-3 text-sm font-medium text-emerald-300 transition hover:bg-emerald-900/70 hover:border-emerald-600"
-                >
-                  + Add/Import Payload
-                </button>
-                {payloadWords.length > 0 && (
-                  <button
-                    onClick={() => {
-                      setPayloadWords([]);
-                      setPayloadText("");
-                      setFileName("");
-                      setSendResults([]);
-                      setIsSending(false);
-                      setPreviewResult("");
-                    }}
-                    className="rounded-2xl border border-red-700/50 bg-red-950/50 px-4 py-3 text-sm font-medium text-red-300 transition hover:bg-red-900/70 hover:border-red-600"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Payload Summary */}
-            {payloadWords.length > 0 && (
-              <div className="rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6">
-                <h2 className="text-lg font-semibold text-slate-100 mb-4">Payload Summary</h2>
-                <p className="text-sm text-slate-300 mb-2">Loaded {payloadWords.length} payload words.</p>
-                <p className="text-sm text-slate-500">
-                  Each payload word will be sent in a separate request by replacing marked payload injection points in the request.
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* Right Column: Preview and Results */}
-          <div className="space-y-6">
-            {payloadWords.length > 0 && (
-              <div className="grid gap-3">
-                <button
-                  onClick={handleApplyPayload}
-                  className="w-full rounded-2xl border border-amber-700/50 bg-gradient-to-r from-amber-950/70 to-amber-900/70 px-6 py-4 text-sm font-semibold text-amber-300 transition hover:from-amber-900 hover:to-amber-800 hover:border-amber-600"
-                >
-                  Apply Payload
-                </button>
-                <button
-                  onClick={handleSendPayload}
-                  disabled={isSending}
-                  className="w-full rounded-2xl border border-cyan-700/50 bg-gradient-to-r from-cyan-950/70 to-cyan-900/70 px-6 py-4 text-sm font-semibold text-cyan-300 transition hover:from-cyan-900 hover:to-cyan-800 hover:border-cyan-600 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isSending ? `Sending ${payloadWords.length} requests...` : "Send Payload"}
-                </button>
-              </div>
-            )}
-
-            {previewResult && (
-              <div className="rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6">
-                <h2 className="text-lg font-semibold text-slate-100 mb-4">Preview</h2>
-                <pre className="text-xs text-slate-300 bg-slate-950/90 p-4 rounded-2xl overflow-x-auto border border-slate-800/80">
-                  {previewResult}
-                </pre>
-              </div>
-            )}
-
-            {sendResults.length > 0 && (
-              <div className="rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
-                  <div>
-                    <h2 className="text-lg font-semibold text-slate-100">Send Results</h2>
-                    <p className="text-sm text-slate-500">
-                      Results for each payload word. Auto-scroll will pause while you interact with the table.
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleSort}
-                    className="rounded-2xl border border-slate-700/50 bg-slate-950/50 px-4 py-2 text-xs font-medium text-slate-300 transition hover:border-slate-600 hover:text-slate-200"
-                  >
-                    Sort by Status {sortDirection === 'asc' ? '↑' : '↓'}
-                  </button>
-                </div>
-
-                <div
-                  ref={resultsContainerRef}
-                  onScroll={handleResultsInteraction}
-                  onMouseEnter={handleResultsInteraction}
-                  onTouchStart={handleResultsInteraction}
-                  className="max-h-[360px] overflow-y-auto rounded-2xl border border-slate-800/80 bg-slate-950/70"
-                >
-                  <table className="w-full text-sm">
-                    <thead className="sticky top-0 bg-slate-950/95">
-                      <tr className="border-b border-slate-800/80">
-                        <th className="text-left py-3 px-2 text-slate-400 font-medium">#</th>
-                        <th className="text-left py-3 px-2 text-slate-300 font-medium">Word</th>
-                        <th className="text-left py-3 px-2 text-slate-300 font-medium">Status</th>
-                        <th className="text-left py-3 px-2 text-slate-300 font-medium">URL</th>
-                        <th className="text-left py-3 px-2 text-slate-300 font-medium">Body Snippet</th>
-                        <th className="text-left py-3 px-2 text-slate-300 font-medium">Error</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {[...sendResults]
-                        .sort((a, b) =>
-                          sortDirection === 'asc'
-                            ? a.status - b.status
-                            : b.status - a.status
-                        )
-                        .map((result, index) => (
-                          <tr
-                            key={`${result.word}-${index}`}
-                            className="border-b border-slate-800/80 hover:bg-slate-950/60 transition"
-                          >
-                            <td className="py-3 px-2 text-slate-400">{index + 1}</td>
-                            <td className="py-3 px-2 text-slate-100 break-all">{result.word}</td>
-                            <td className="py-3 px-2 text-slate-200">{result.status}</td>
-                            <td className="py-3 px-2 text-slate-400 break-all">{result.url}</td>
-                            <td className="py-3 px-2 text-slate-400 break-all">{result.bodySnippet}</td>
-                            <td className="py-3 px-2 text-rose-300 break-all">{result.error || "-"}</td>
-                          </tr>
-                        ))}
-                    </tbody>
-                  </table>
-                  <div ref={resultsEndRef} />
-                </div>
-              </div>
-            )}
-
-            <div className="rounded-3xl border border-slate-700/50 bg-slate-900/50 p-4">
-              <p className="text-xs text-slate-400 leading-relaxed">
-                <span className="text-emerald-400 font-semibold">💡 Tip:</span> This is a
-                frontend preview. Use the Send Payload button to post the current
-                request to `/api/repeater/send` when a backend is available.
+        <div className="rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6 shadow-xl">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-100">Request editor</h2>
+              <p className="text-sm text-slate-500">
+                Highlight a value, then <span className="text-amber-300/90">Mark §</span> wraps it as{" "}
+                <code className="text-slate-300">§payload§</code>.
               </p>
             </div>
+            <button
+              type="button"
+              onClick={handleMarkSection}
+              disabled={!markEnabled()}
+              className="rounded-2xl border border-amber-700/50 bg-amber-950/50 px-4 py-2 text-sm font-medium text-amber-300 transition hover:border-amber-600 hover:bg-amber-900/70 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Mark §
+            </button>
+          </div>
+          <textarea
+            ref={requestRef}
+            id="payload-request-editor"
+            value={requestText}
+            onChange={(e) => setRequestText(e.target.value)}
+            onSelect={onSelectRequest}
+            onKeyUp={onSelectRequest}
+            onMouseUp={onSelectRequest}
+            className="mt-4 max-h-[min(38vh,320px)] min-h-[160px] w-full resize-y overflow-y-auto rounded-3xl border border-slate-800/80 bg-slate-950/90 p-4 font-mono text-sm text-slate-100 outline-none focus:border-emerald-500/60"
+            spellCheck={false}
+          />
+          <div className="mt-4 rounded-2xl border border-slate-800/60 bg-slate-950/80 px-4 py-3 text-sm text-slate-400">
+            <span className="text-slate-500">Injection placeholder: </span>
+            <span className="font-mono text-slate-200">{placeholderLabel}</span>
           </div>
         </div>
+
+        <div className="grid gap-6 lg:grid-cols-2">
+          <div className="rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6 shadow-xl">
+            <h2 className="text-lg font-semibold text-slate-100">Word list</h2>
+            <p className="mt-1 text-sm text-slate-500">One word per line. Empty lines are skipped.</p>
+
+            <input
+              ref={wordListFileRef}
+              type="file"
+              accept=".txt,.csv,.lst,.log,.md,.tsv,.dict,text/plain,text/*,application/json"
+              className="hidden"
+              onChange={handleWordListFile}
+            />
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                disabled={sending}
+                onClick={() => wordListFileRef.current?.click()}
+                className="rounded-2xl border border-slate-700/80 bg-slate-950/90 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-emerald-500/50 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Load from text file…
+              </button>
+              <span className="text-xs text-slate-500">Text files only; must be under 50 MB.</span>
+            </div>
+            {wordListFileName && (
+              <p className="mt-2 text-xs text-emerald-400/90">Loaded: {wordListFileName}</p>
+            )}
+            {wordListFileError && (
+              <p className="mt-2 rounded-2xl border border-rose-500/40 bg-rose-950/30 px-3 py-2 text-xs text-rose-200">
+                {wordListFileError}
+              </p>
+            )}
+
+            <textarea
+              value={wordListText}
+              onChange={(e) => {
+                setWordListText(e.target.value);
+                setWordListFileName("");
+                setWordListFileError("");
+              }}
+              className="mt-4 max-h-[min(32vh,280px)] min-h-[120px] w-full resize-y overflow-y-auto rounded-3xl border border-slate-800/80 bg-slate-950/90 p-4 font-mono text-sm text-slate-100 outline-none focus:border-emerald-500/60"
+              placeholder={"admin\npassword123\n…"}
+              spellCheck={false}
+            />
+          </div>
+
+          <div className="space-y-4 rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6 shadow-xl">
+            <div>
+              <label htmlFor="delay-ms" className="text-sm font-medium text-slate-300">
+                Delay between requests (ms)
+              </label>
+              <input
+                id="delay-ms"
+                type="number"
+                min={0}
+                value={delayMs}
+                onChange={(e) => setDelayMs(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                className="mt-2 w-full rounded-2xl border border-slate-800/80 bg-slate-950/90 px-4 py-2 text-sm text-slate-100 outline-none focus:border-emerald-500/60"
+              />
+            </div>
+
+            {sending && progress.total > 0 && (
+              <p className="text-sm text-emerald-300">
+                Sending {progress.current} / {progress.total}…
+              </p>
+            )}
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={handleSendPayload}
+                disabled={!canSend}
+                className="rounded-2xl border border-emerald-700/50 bg-emerald-950/50 px-5 py-2.5 text-sm font-medium text-emerald-300 transition hover:border-emerald-600 hover:bg-emerald-900/70 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Send ({n} requests)
+              </button>
+              {sending && (
+                <button
+                  type="button"
+                  onClick={handleStop}
+                  className="rounded-2xl border border-rose-700/50 bg-rose-950/50 px-5 py-2.5 text-sm font-medium text-rose-300 transition hover:border-rose-600 hover:bg-rose-900/70"
+                >
+                  Stop
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {results.length > 0 && (
+          <div className="flex min-h-0 flex-col rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6 shadow-xl">
+            <div className="flex shrink-0 flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-100">Results</h2>
+                <p className="mt-1 max-w-2xl text-sm text-slate-500">
+                  Click a row to expand the full response body. Table auto-scrolls to new rows unless you scroll up.
+                  Use <span className="text-slate-400">Status</span> for primary order (asc → desc → off), then{" "}
+                  <span className="text-slate-400">Response preview</span> to sort within the same status (or preview
+                  only if status is off). Each header cycles its own direction.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleClearResults}
+                className="shrink-0 rounded-2xl border border-rose-500/35 bg-rose-950/40 px-4 py-2 text-sm font-medium text-rose-200 transition hover:border-rose-500/60 hover:bg-rose-900/50"
+              >
+                Clear results
+              </button>
+            </div>
+            <div
+              ref={resultsScrollRef}
+              onScroll={handleResultsScroll}
+              className="mt-4 max-h-[min(42vh,380px)] min-h-0 overflow-y-auto overflow-x-auto rounded-2xl border border-slate-800/80 bg-slate-950/70"
+            >
+              <table className="w-full min-w-[640px] table-fixed border-separate border-spacing-0 text-left text-sm">
+                <colgroup>
+                  <col style={{ width: "3rem" }} />
+                  <col style={{ width: "18%" }} />
+                  <col style={{ width: "24%" }} />
+                  <col style={{ width: "5.5rem" }} />
+                  <col style={{ width: "auto" }} />
+                </colgroup>
+                <thead className="sticky top-0 z-10 border-b border-slate-800/80 bg-slate-950/95 text-slate-400 shadow-[0_1px_0_0_rgb(15_23_42_/_0.8)]">
+                  <tr>
+                    <th className="px-3 py-3 font-medium">#</th>
+                    <th className="px-3 py-3 font-medium">Word</th>
+                    <th className="px-3 py-3 font-medium">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleResultsSortByStatus();
+                        }}
+                        className={`group inline-flex items-center gap-1 rounded-lg px-1 py-0.5 text-left font-medium transition hover:bg-slate-800/80 hover:text-slate-200 ${
+                          resultsStatusDir !== null ? "text-emerald-300" : ""
+                        }`}
+                        title="Primary sort: HTTP status (asc → desc → off). Response preview sorts within the same status when both are on."
+                      >
+                        Status
+                        {resultsStatusDir !== null && (
+                          <span className="text-emerald-400/90" aria-hidden>
+                            {resultsStatusDir === "asc" ? "↑" : "↓"}
+                          </span>
+                        )}
+                      </button>
+                    </th>
+                    <th className="px-3 py-3 font-medium">Time (ms)</th>
+                    <th className="px-3 py-3 font-medium">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleResultsSortByPreview();
+                        }}
+                        className={`group inline-flex items-center gap-1 rounded-lg px-1 py-0.5 text-left font-medium transition hover:bg-slate-800/80 hover:text-slate-200 ${
+                          resultsPreviewDir !== null ? "text-emerald-300" : ""
+                        }`}
+                        title="Secondary sort by preview when status sort is on; otherwise primary by preview only."
+                      >
+                        Response preview
+                        {resultsPreviewDir !== null && (
+                          <span className="text-emerald-400/90" aria-hidden>
+                            {resultsPreviewDir === "asc" ? "↑" : "↓"}
+                          </span>
+                        )}
+                      </button>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedResults.map((row, index) => (
+                    <ResultRowGroup
+                      key={row.id}
+                      row={row}
+                      index={index}
+                      expanded={expandedId === row.id}
+                      onToggle={() =>
+                        setExpandedId((cur) => (cur === row.id ? null : row.id))
+                      }
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+function ResultRowGroup({ row, index, expanded, onToggle }) {
+  return (
+    <>
+      <tr
+        className="cursor-pointer border-b border-slate-800/60 transition hover:bg-slate-900/80"
+        onClick={onToggle}
+      >
+        <td className="px-3 py-3 align-top text-slate-500">{index + 1}</td>
+        <td className="max-w-0 px-3 py-3 align-top font-mono text-slate-200">
+          <div className="truncate" title={row.word}>
+            {row.word}
+          </div>
+        </td>
+        <td className="max-w-0 px-3 py-3 align-top">
+          <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center">
+            <span
+              className={`inline-flex w-fit shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold ${statusBadgeClass(row.status_code)}`}
+            >
+              {row.error ? "ERR" : row.status_code}
+            </span>
+            {row.error && (
+              <span className={`min-w-0 truncate text-xs ${statusClass(row.status_code)}`} title={row.error}>
+                {row.error}
+              </span>
+            )}
+          </div>
+        </td>
+        <td className={`px-3 py-3 align-top tabular-nums ${statusClass(row.status_code)}`}>{row.elapsedMs}</td>
+        <td className="max-w-0 px-3 py-3 align-top text-slate-400">
+          <div className="truncate" title={row.preview || undefined}>
+            {row.preview || "—"}
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="border-b border-slate-800/60 bg-slate-950/50">
+          <td colSpan={5} className="p-4">
+            <p className="text-xs uppercase tracking-wide text-slate-500">Full response body</p>
+            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-2xl border border-slate-800/80 bg-slate-950/90 p-3 text-xs text-slate-200">
+              {row.error ? row.error : row.fullBody || "(empty)"}
+            </pre>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }

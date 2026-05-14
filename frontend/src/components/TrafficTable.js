@@ -1,7 +1,15 @@
+"use client";
+
+import { useEffect, useRef } from "react";
+
 function statusStyle(status) {
+  if (typeof status !== "number" || Number.isNaN(status)) {
+    return "bg-slate-600/20 text-slate-300";
+  }
   if (status >= 200 && status < 300) return "bg-emerald-500/15 text-emerald-300";
   if (status >= 300 && status < 400) return "bg-sky-500/15 text-sky-300";
   if (status >= 400 && status < 500) return "bg-amber-500/15 text-amber-300";
+  if (status === 0) return "bg-slate-600/20 text-slate-300";
   return "bg-rose-500/15 text-rose-300";
 }
 
@@ -20,13 +28,30 @@ export default function TrafficTable({
   interceptOn,
   onSelectRequest,
   onToggleSelect,
-  onSelectAll,
   onForwardSelected,
   onForwardAll,
   onDropSelected,
   onDropAll,
 }) {
-  const allSelected = traffic.length > 0 && selectedIds?.length === traffic.length;
+  const scrollRef = useRef(null);
+  const stickToBottomRef = useRef(true);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (stickToBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [traffic]);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = 40;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distance <= nearBottom;
+  };
+
   const actionDisabled = !selectedIds || selectedIds.length === 0;
 
   return (
@@ -78,7 +103,11 @@ export default function TrafficTable({
           <p className="mt-3 text-sm text-slate-400">{selectedIds.length || 0} selected</p>
         )}
       </div>
-      <div className="overflow-x-auto">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="max-h-[480px] overflow-y-auto overflow-x-auto"
+      >
         <table className="min-w-full border-separate border-spacing-0 text-left text-sm">
           <thead className="bg-slate-950/80 text-slate-400">
             <tr>

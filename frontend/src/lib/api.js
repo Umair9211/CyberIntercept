@@ -2,10 +2,11 @@
 // Central API client — all backend calls live here.
 // Base URL reads from an env var so you can override it per environment.
 
-const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://127.0.0.1:8000";
+export const BASE_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://127.0.0.1:8000";
 
 async function request(method, path, body) {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${BASE_URL}${path}`, {
     method,
     headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
@@ -69,6 +70,9 @@ export const dropRequest = (id) =>
  */
 export const getCapturedTraffic = () =>
   request("GET", "/api/requests");
+
+/** Clear captured log and pending intercept queue on the backend. */
+export const clearTraffic = () => request("DELETE", "/api/requests");
 
 // ── Repeater ─────────────────────────────────────────────────────────────────
 
