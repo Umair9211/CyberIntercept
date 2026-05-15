@@ -51,6 +51,7 @@ pip install -r requirements.txt
 ```bash
 cd frontend
 npm install
+npm run build
 ```
 
 Optional: `frontend/.env` already sets the API URL. To change it:
@@ -103,6 +104,9 @@ Or from root: `npm run backend`
 ```bash
 cd frontend
 npm run dev -- --webpack
+or 
+npm run build
+npm start
 ```
 
 Or from root: `npm run frontend`

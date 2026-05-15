@@ -5,7 +5,7 @@
   "description": "CyberIntercept — FastAPI backend + Next.js frontend",
   "scripts": {
     "backend": "cd backend && uvicorn app.main:app --reload --port 8000",
-    "frontend": "cd frontend && npm run dev -- --webpack",
+    "frontend": "cd frontend && npm start",
     "dev": "concurrently -n backend,frontend -c blue,magenta \"npm run backend\" \"npm run frontend\""
   },
   "devDependencies": {
