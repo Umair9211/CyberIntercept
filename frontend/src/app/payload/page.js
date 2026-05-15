@@ -2,8 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { ThemeToggle } from "@/components/ThemeProvider";
 import { sendRepeaterRequest } from "@/lib/api";
 import { buildRequestText, parseRawHttpMessage } from "@/lib/httpRawRequest";
+import {
+  consumePayloadRequest,
+  decodePayloadFromQueryParam,
+} from "@/lib/payloadTransfer";
 
 const DEFAULT_REQUEST = `GET /example HTTP/1.1
 Host: example.com
@@ -58,7 +63,8 @@ function statusSortValue(row) {
 export default function PayloadPage() {
   const requestRef = useRef(null);
   const wordListFileRef = useRef(null);
-  const [requestText, setRequestText] = useState(DEFAULT_REQUEST);
+  const [payloadReady, setPayloadReady] = useState(false);
+  const [requestText, setRequestText] = useState("");
   const [wordListText, setWordListText] = useState("");
   const [wordListFileName, setWordListFileName] = useState("");
   const [wordListFileError, setWordListFileError] = useState("");
@@ -75,15 +81,23 @@ export default function PayloadPage() {
   const resultsStickBottomRef = useRef(true);
 
   useEffect(() => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      const raw = params.get("data");
-      if (!raw) return;
-      const request = JSON.parse(decodeURIComponent(atob(raw)));
-      setRequestText(buildRequestText(request));
-    } catch {
-      // Invalid or missing payload query — keep default template
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("id");
+    if (id) {
+      const text = consumePayloadRequest(id);
+      setRequestText(text ?? DEFAULT_REQUEST);
+      setPayloadReady(true);
+      return;
     }
+
+    const raw = params.get("data");
+    if (raw) {
+      const request = decodePayloadFromQueryParam(raw);
+      setRequestText(request ? buildRequestText(request) : DEFAULT_REQUEST);
+    } else {
+      setRequestText(DEFAULT_REQUEST);
+    }
+    setPayloadReady(true);
   }, []);
 
   const words = wordListText
@@ -280,23 +294,39 @@ export default function PayloadPage() {
     setResultsPreviewDir(null);
   }, []);
 
+  if (!payloadReady) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-slate-100 dark:bg-slate-950">
+        <div className="h-10 w-10 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+        <p className="text-sm font-medium text-slate-600 dark:text-slate-400">Loading payload…</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-slate-950 p-4 text-slate-100 sm:p-6">
+    <div className="min-h-screen bg-slate-100 p-4 text-slate-900 dark:bg-slate-950 dark:text-slate-100 sm:p-6">
       <div className="mx-auto max-w-6xl space-y-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.24em] text-slate-500">CyberIntercept</p>
-            <h1 className="mt-2 text-3xl font-semibold text-slate-100">Payload / Intruder</h1>
-            <p className="mt-2 text-sm text-slate-400">
+            <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl dark:text-white">
+              CyberIntercept
+            </h1>
+            <p className="mt-2 text-xl font-semibold text-slate-800 dark:text-slate-100">
+              Payload / Intruder
+            </p>
+            <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
               Mark an injection point with §, load a word list, send sequentially via the repeater API.
             </p>
           </div>
-          <Link
-            href="/"
-            className="inline-flex w-fit rounded-2xl border border-slate-800/80 bg-slate-900/80 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-600 hover:bg-slate-900"
-          >
-            ← Dashboard
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            <ThemeToggle />
+            <Link
+              href="/"
+              className="inline-flex w-fit rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm text-slate-800 transition hover:bg-slate-50 dark:border-slate-800/80 dark:bg-slate-900/80 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-900"
+            >
+              ← Dashboard
+            </Link>
+          </div>
         </div>
 
         <div className="rounded-3xl border border-slate-800/80 bg-slate-900/80 p-6 shadow-xl">

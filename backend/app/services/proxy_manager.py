@@ -94,6 +94,29 @@ def start_proxy(port=8080):
     }
 
 
+def proxy_status(default_port: int = 8080):
+    """Report whether mitm is listening and which port is in use."""
+    ports_to_check = []
+    if proxy_port is not None:
+        ports_to_check.append(proxy_port)
+    if default_port not in ports_to_check:
+        ports_to_check.append(default_port)
+
+    capture_on = False
+    active_port = proxy_port or default_port
+    for port in ports_to_check:
+        proc = _find_listening_process(port)
+        if proc and _is_mitm_process(proc):
+            capture_on = True
+            active_port = port
+            break
+
+    return {
+        "capture_on": capture_on,
+        "port": active_port,
+    }
+
+
 def stop_proxy(port=None):
     global proxy_process, proxy_port
 

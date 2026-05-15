@@ -28,6 +28,10 @@ export const startProxy = (port = 8080) =>
 export const stopProxy = (port = 8080) =>
   request("GET", `/proxy/stop?port=${port}`);
 
+/** Current capture / intercept state (shared across all dashboard tabs). */
+export const getProxyStatus = (port = 8080) =>
+  request("GET", `/proxy/status?port=${port}`);
+
 // ── Intercept mode ───────────────────────────────────────────────────────────
 
 /** Enable intercept mode — incoming requests will be paused. */

@@ -82,8 +82,6 @@ def _is_backend_self_request(url: str) -> bool:
 @router.post("/api/traffic")
 async def receive_traffic(data: dict):
     storage.captured_requests.append(data)
-    print(f"\n[BACKEND] Traffic stored: {data.get('method')} {data.get('url')}")
-    print(f"Total captured requests: {len(storage.captured_requests)}")
     return {
         "status": "captured"
     }
@@ -105,7 +103,6 @@ async def create_intercept_request(data: dict):
         "decision": "pending",
         "created_at": time.time(),
     }
-    print(f"\n[BACKEND] Intercept queued: {request_id} {data.get('method')} {data.get('url')}")
     return {"intercept": True, "id": request_id}
 
 @router.get("/api/intercept/{request_id}/decision")
