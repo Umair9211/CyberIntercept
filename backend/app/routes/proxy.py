@@ -1,8 +1,17 @@
 from fastapi import APIRouter, HTTPException
 import app.storage as storage
-from app.services.proxy_manager import start_proxy, stop_proxy
+from app.services.proxy_manager import start_proxy, stop_proxy, proxy_status
 
 router = APIRouter(prefix="/proxy")
+
+@router.get("/status")
+def status(port: int = 8080):
+    info = proxy_status(port)
+    return {
+        "capture_on": info["capture_on"],
+        "intercept_on": storage.intercept_mode,
+        "port": info["port"],
+    }
 
 @router.get("/start")
 def start(port: int = 8080):
@@ -10,7 +19,11 @@ def start(port: int = 8080):
 
 @router.get("/stop")
 def stop(port: int = None):
-    return stop_proxy(port)
+    result = stop_proxy(port)
+    if isinstance(result, dict) and result.get("status") == "stopped":
+        storage.captured_requests.clear()
+        storage.pending_requests.clear()
+    return result
 
 @router.post("/intercept/on")
 def intercept_on():
@@ -26,6 +39,9 @@ def intercept_off():
             item["decision"] = "forward"
             item["status"] = "forwarded"
             forced += 1
+    # Drop captured log and pending map so refresh / next capture does not replay stale rows.
+    storage.captured_requests.clear()
+    storage.pending_requests.clear()
     return {"status": "intercept_off", "forwarded": forced}
 
 @router.get("/intercept/pending")
