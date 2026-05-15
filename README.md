@@ -224,4 +224,4 @@ Turn **Capture** **OFF** and disable FoxyProxy when you are done.
 
 ## License
 
-See repository license file if present.
+See MIT license file.
