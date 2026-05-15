@@ -324,10 +324,7 @@ export default function Home() {
                   <p className="text-xs uppercase tracking-[0.24em] text-slate-500 dark:text-slate-500">Captured</p>
                   <p className="mt-3 text-3xl font-semibold text-slate-900 dark:text-slate-100">{stats.total}</p>
                 </div>
-                <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5 dark:border-transparent dark:bg-slate-950/90">
-                  <p className="text-xs uppercase tracking-[0.24em] text-slate-500 dark:text-slate-500">Successful</p>
-                  <p className="mt-3 text-3xl font-semibold text-emerald-700 dark:text-emerald-300">{stats.successful}</p>
-                </div>
+                
               </div>
             </div>
 
